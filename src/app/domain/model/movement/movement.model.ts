@@ -35,7 +35,7 @@ export interface MovementsQuery {
   cursor?: string;
 }
 
-export interface MovementDayGroup {
-  day: string;
-  items: { movement: Movement; time: string }[];
-}
+/** Fila de la lista virtual: encabezado de día contable o movimiento. */
+export type MovementRow =
+  | { kind: 'day'; id: string; day: string }
+  | { kind: 'movement'; id: string; movement: Movement; day: string; time: string };

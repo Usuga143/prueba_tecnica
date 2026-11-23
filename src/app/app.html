@@ -3,8 +3,24 @@
   <span class="topbar__brand">Banco Cordillera · Portal Empresas</span>
   <nav aria-label="Principal">
     <a routerLink="/movimientos" routerLinkActive="is-active" ariaCurrentWhenActive="page">Movimientos</a>
+    <a routerLink="/transferencias/nueva" routerLinkActive="is-active" ariaCurrentWhenActive="page">Nueva transferencia</a>
   </nav>
 </header>
+
+@if (session.status() === 'warning') {
+  <div class="session-banner session-banner--warning" role="alert">
+    <p>
+      Tu sesión vence en {{ session.secondsLeft() }} segundos por inactividad. Lo que escribiste se conserva
+      si sigues conectado.
+    </p>
+    <button type="button" (click)="keepAlive()">Seguir conectado</button>
+  </div>
+} @else if (session.status() === 'expired') {
+  <div class="session-banner session-banner--expired" role="alert">
+    <p>Tu sesión venció por inactividad. Inicia sesión de nuevo para continuar.</p>
+  </div>
+}
+
 <main id="contenido" tabindex="-1">
   <router-outlet />
 </main>

@@ -8,6 +8,7 @@ import { ApiError } from '../../../../app/domain/model/shared/api-error.model';
 import { MovementPort } from '../../../../app/domain/ports/movement/movement.port';
 import { SAMPLE_ACCOUNT, SAMPLE_MOVEMENTS } from '../../../../app/infrastructure/mock/simulated-data';
 import { MovementsPage } from '../../../../app/ui/pages/movements/movements-page';
+import { expectNoAccessibilityViolations } from '../../../support/axe';
 
 registerLocaleData(localeEsCo);
 
@@ -137,5 +138,10 @@ describe('MovementsPage', () => {
     expect(getMovements).toHaveBeenCalledWith(
       jasmine.objectContaining({ desde: '2026-09-01', hasta: '2026-09-30' }),
     );
+  });
+  it('has no WCAG 2.2 AA violations with the sample movements', async () => {
+    getMovements.and.returnValue(of(response(SAMPLE_MOVEMENTS)));
+    const { el } = render();
+    await expectNoAccessibilityViolations(el);
   });
 });

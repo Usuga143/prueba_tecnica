@@ -12,8 +12,8 @@ import {
   MovementsResponse,
 } from '../../../domain/model/movement/movement.model';
 import { ApiError } from '../../../domain/model/shared/api-error.model';
+import { CURRENT_ACCOUNT_ID } from '../../../domain/model/shared/current-account';
 
-export const ACCOUNT_ID = 'REC-2231';
 export const PAGE_SIZE = 200;
 
 const MONTHS = [
@@ -54,7 +54,7 @@ export class MovementsPage {
     this.load$.pipe(
       switchMap((period) =>
         this.listMovements
-          .execute({ accountId: ACCOUNT_ID, ...monthRange(period), limite: PAGE_SIZE })
+          .execute({ accountId: CURRENT_ACCOUNT_ID, ...monthRange(period), limite: PAGE_SIZE })
           .pipe(
             map(toLoadedState),
             startWith<ViewState>({ kind: 'loading' }),

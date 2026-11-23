@@ -1,0 +1,73 @@
+<section class="movements" aria-labelledby="movements-title">
+  <h1 id="movements-title">Movimientos de la cuenta</h1>
+
+  <form class="period" (submit)="$event.preventDefault()">
+    <fieldset>
+      <legend>Periodo</legend>
+      <div class="field">
+        <label for="period-month">Mes</label>
+        <select id="period-month" (change)="onMonthChange($event)">
+          @for (name of months; track $index) {
+            <option [value]="$index + 1" [selected]="$index + 1 === period().month">{{ name }}</option>
+          }
+        </select>
+      </div>
+      <div class="field">
+        <label for="period-year">Año</label>
+        <select id="period-year" (change)="onYearChange($event)">
+          @for (year of years; track year) {
+            <option [value]="year" [selected]="year === period().year">{{ year }}</option>
+          }
+        </select>
+      </div>
+    </fieldset>
+  </form>
+
+  @let view = state();
+
+  @if (view.kind === 'loading') {
+    <p class="notice" role="status">Cargando movimientos…</p>
+  } @else if (view.kind === 'empty') {
+    <p class="notice" role="status">No hay movimientos en este periodo.</p>
+  } @else if (view.kind === 'session-expired') {
+    <div class="notice notice--warning" role="alert">
+      <h2>Tu sesión venció</h2>
+      <p>Por seguridad cerramos tu sesión tras 5 minutos de inactividad. Inicia sesión de nuevo para continuar.</p>
+    </div>
+  } @else if (view.kind === 'error') {
+    <div class="notice notice--error" role="alert">
+      <p>{{ view.message }}</p>
+      @if (view.canRetry) {
+        <button type="button" (click)="retry()">Reintentar</button>
+      }
+    </div>
+  } @else {
+    <p class="summary" role="status">
+      Cuenta {{ view.account.numeroEnmascarado }} · {{ view.account.titular }} ·
+      Mostrando {{ view.shown }} de {{ view.total }} movimientos
+    </p>
+
+    @for (group of view.groups; track group.day) {
+      <section class="day" [attr.aria-labelledby]="'day-' + group.day">
+        <h2 class="day__title" [id]="'day-' + group.day">{{ group.day | date: 'fullDate' : 'UTC' }}</h2>
+        <ul class="day__list">
+          @for (item of group.items; track item.movement.id) {
+            <li class="row">
+              <span class="row__time">{{ item.time }}</span>
+              <span class="row__description">{{ item.movement.descripcion }}</span>
+              <span class="row__reference">{{ item.movement.referencia ?? 'Sin referencia' }}</span>
+              <span class="row__status">
+                @if (item.movement.estado === 'EN_PROCESO') {
+                  <span class="badge">En proceso</span>
+                }
+              </span>
+              <span class="row__amount" [class.row__amount--credit]="isCredit(item.movement.monto)">
+                {{ isCredit(item.movement.monto) ? '+' : '' }}{{ item.movement.monto | currency: 'COP' : 'symbol-narrow' : '1.2-2' }}
+              </span>
+            </li>
+          }
+        </ul>
+      </section>
+    }
+  }
+</section>

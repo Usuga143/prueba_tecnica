@@ -1,6 +1,6 @@
 # Registro de decisiones — DS-FE-20261119-xpjf
 
-Inicio: 12:52 · Fin de la Parte 1: 13:50 · Fin: <hora>
+Inicio: 12:52 · Fin de la Parte 1: 13:50 · Fin: 14:25
 
 ## Supuestos
 
@@ -30,7 +30,7 @@ Inicio: 12:52 · Fin de la Parte 1: 13:50 · Fin: <hora>
   - **Angular 20 standalone con zone.js:** es lo que uso en mi trabajo; CLI, pruebas y router incluidos.
 - **Decisión:** Angular 20, standalone, zone.js, SCSS, sin SSR.
 - **Por qué:** dominio del framework para sustentar; el enunciado pide un cliente web (sin SSR).
-- **Consecuencias y trade-offs:** zone.js suma unos KB al bundle; el inicial queda en 89,86 KB comprimido, lejos del límite de 250 KB.
+- **Consecuencias y trade-offs:** zone.js suma unos KB al bundle; el inicial queda en 98,60 KB comprimido al final de la Parte 3, lejos del límite de 250 KB.
 - **Dónde se ve:** `package.json`, `angular.json`, `app.config.ts`.
 
 ### D-02 Arquitectura hexagonal: `domain/model`, `domain/ports`, `application`, `infrastructure`, `ui`
@@ -185,7 +185,7 @@ Inicio: 12:52 · Fin de la Parte 1: 13:50 · Fin: <hora>
 - **Contexto:** límite de 250 KB de JavaScript inicial comprimido.
 - **Alternativas consideradas:** importar la pantalla directamente (todo en el bundle inicial); **`loadComponent`**.
 - **Decisión:** `/movimientos` se carga con `loadComponent`.
-- **Por qué:** cada pantalla nueva (transferencia, detalle) no aumenta el JavaScript inicial. Medido: inicial 89,86 KB comprimido; la pantalla, 3,11 KB aparte.
+- **Por qué:** cada pantalla nueva (transferencia, detalle) no aumenta el JavaScript inicial. Medido al final: inicial 98,60 KB comprimido; Movimientos 11,09 KB y Nueva transferencia 14,21 KB, aparte.
 - **Dónde se ve:** `app.routes.ts`, salida de `npm run build`.
 
 ### D-19 Pruebas en `src/test` con la misma estructura que `src/app`
@@ -308,19 +308,107 @@ Inicio: 12:52 · Fin de la Parte 1: 13:50 · Fin: <hora>
 - **Decisión:** no agregarla; en su lugar, vista previa del monto interpretado.
 - **Consecuencias y trade-offs:** si el banco la exige, se agregaría como un estado del mismo componente.
 
+### D-33 Lista virtual con `@angular/cdk/scrolling` y alto fijo de fila
+- **Tema:** rendimiento
+- **Contexto:** octubre tiene 50.000 movimientos. El portal anterior pintaba todas las filas: 118.188 nodos, tareas de 4.120 ms y 611 MB (INC-2026-1187, líneas 36 y 37). Meta: INP < 200 ms en un portátil de 8 GB.
+- **Alternativas consideradas:**
+  - Paginación clásica (página 1, 2, 3…): DOM pequeño, pero el enunciado pide "recorrer todos los movimientos" y no sirve para leer de corrido.
+  - Scroll infinito sin virtualizar: repite el incidente.
+  - Lista virtual propia: más código para mantener.
+  - **CDK Virtual Scroll:** oficial de Angular, se carga solo con la pantalla.
+- **Decisión:** `cdk-virtual-scroll-viewport` con filas de 56 px. Los encabezados de día son filas más de la lista.
+- **Por qué:** el DOM no depende del total. Medido: 319 nodos con 5.000 movimientos cargados.
+- **Consecuencias y trade-offs:** filas de alto fijo (la descripción larga se corta con "…" y un `title`); sin encabezados "pegajosos"; el lector de pantalla solo ve las filas dibujadas (RIESGOS R-11). La CDK suma unos 9 KB comprimidos a la pantalla de Movimientos, no al inicial.
+- **Dónde se ve:** `movements-page.html`, `movements-page.scss`.
+
+### D-34 Paginación por cursor, una página a la vez, al acercarse al final
+- **Tema:** rendimiento
+- **Contexto:** máximo 200 registros por página; más de 10 peticiones por segundo reciben 429; el cursor solo vale con los mismos parámetros.
+- **Alternativas consideradas:** descargar las 250 páginas al entrar (viola el límite de 429 y desperdicia memoria); `mergeMap` (varias páginas en paralelo, en desorden); **`exhaustMap`** (ignora pedidos mientras una página está en camino).
+- **Decisión:** primera página de 200; la siguiente cuando faltan 60 filas por ver, o con el botón "Cargar más movimientos" (útil con teclado). El cursor vive dentro de la consulta que lo generó.
+- **Por qué:** como mucho unas 3 peticiones por segundo al bajar rápido; nunca se mezcla un cursor de otra búsqueda (línea 24 del incidente).
+- **Dónde se ve:** `movements-page.ts` (`loadQuery`, `onScrolledIndex`).
+
+### D-35 Búsqueda mientras se escribe: espera de 300 ms + `switchMap`
+- **Tema:** patrón
+- **Contexto:** causa raíz del incidente: una petición por tecla y respuestas aplicadas en orden de llegada (líneas 09–21).
+- **Alternativas consideradas:** buscar al presionar Enter (simple, pero el enunciado pide "mientras escribe"); comparar un número de secuencia en cada respuesta (funciona, pero no cancela las peticiones viejas); **`debounceTime(300)` + mínimo 3 caracteres + `distinctUntilChanged` + `switchMap`**.
+- **Decisión:** la última opción. Al cambiar la búsqueda, el periodo o el orden, se cancela la consulta anterior con sus páginas y se empieza de cero.
+- **Por qué:** con el ritmo del incidente (~170 ms por tecla) sale una sola petición; una respuesta vieja nunca llega a la pantalla.
+- **Consecuencias y trade-offs:** 300 ms de espera antes de buscar.
+- **Dónde se ve:** `movements-page.ts` (`search$`, `state`), pruebas "searches once..." e "ignores a slow response...".
+
+### D-36 Orden solo en el servidor; sin agrupar por día cuando se ordena por monto
+- **Tema:** rendimiento
+- **Contexto:** el portal anterior ordenaba en el cliente 4.400 filas en 920 ms (línea 33). Ordenar en el cliente solo ordena lo cargado, no los 50.000.
+- **Alternativas consideradas:** ordenar en el cliente (incorrecto con datos parciales y lento); **pedir `orden` al servidor**.
+- **Decisión:** el orden es un parámetro de la consulta y reinicia la lista. Con orden por fecha se agrupa por día; con orden por monto, cada fila muestra su fecha ("31 oct · 23:30") en lugar de encabezados que se repetirían en cada fila.
+- **Dónde se ve:** `movements-page.ts` (`loadQuery`), `toRows`.
+
+### D-37 Filas construidas por página, sin recalcular lo ya cargado
+- **Tema:** rendimiento
+- **Contexto:** agregar una página no debe costar más a medida que la lista crece.
+- **Alternativas consideradas:** volver a agrupar todo lo cargado en cada página (costo creciente); **`toRows(página, últimoDía)`**, que solo procesa la página nueva y no repite el encabezado si el día continúa.
+- **Decisión:** la segunda.
+- **Dónde se ve:** `application/movement/list-movements.use-case.ts`, pruebas de `toRows`.
+
+### D-38 API simulada con 50.000 movimientos deterministas e índice precalculado
+- **Tema:** datos
+- **Contexto:** "Tu API simulada genera ese volumen".
+- **Alternativas consideradas:** un JSON de 50.000 registros (varios MB en el bundle); datos aleatorios en cada carga (pruebas no reproducibles); **generador con semilla** que incluye los 6 movimientos de la sección 4.1.
+- **Decisión:** `generateOctoberMovements()` con semilla fija (70 % PSE, 20 % corresponsales, el resto pagos y comisiones; nóminas con y sin tilde; "Nomad Logistica" para reproducir el caso "nom"). El backend simulado calcula una vez el día contable, el texto normalizado y los centavos, y guarda una copia ordenada por criterio.
+- **Por qué:** cada consulta solo filtra; las pruebas son reproducibles.
+- **Consecuencias y trade-offs:** la primera consulta tarda unos 600 ms en generar los datos (tarea larga solo del mock; RIESGOS R-05).
+- **Dónde se ve:** `infrastructure/mock/simulated-data.ts`, `simulated-api.ts` (`sorted`).
+
+### D-39 Medición de rendimiento como prueba automatizada
+- **Tema:** pruebas
+- **Contexto:** se pide una medición de rendimiento de la vista con más registros.
+- **Alternativas consideradas:** Lighthouse (mide la carga, no el scroll ni agregar páginas; requiere levantar la app); medición manual con DevTools (no repetible); **prueba de Karma con la pantalla real y el backend simulado sin latencia**.
+- **Decisión:** `src/test/performance/movements-volume.spec.ts` carga 25 páginas (5.000 movimientos), salta a la mitad de la lista y registra tiempos, nodos y tareas largas (`PerformanceObserver`). Falla si se supera: 1.500 nodos, 200 ms al agregar una página o al desplazarse, 1.000 ms para las primeras filas sin red.
+- **Resultado medido (Chrome headless):** primeras filas 48 ms sin red (más 300 ms de latencia simulada, unos 350 ms en total frente a la meta de 1,5 s); agregar 200 filas, máximo 35–40 ms; salto de scroll 35 ms; 319 nodos y 39 filas dibujadas con 5.000 cargadas; una tarea larga de ~640 ms, que es la generación del mock.
+- **Consecuencias y trade-offs:** es un indicador del INP, no el INP real (que requiere interacción de un usuario en un navegador real). No mide en Edge ni Firefox.
+
+### D-40 Rendimiento de la búsqueda sin cambiar el contrato
+- **Tema:** rendimiento
+- **Contexto:** el mínimo de 3 caracteres es del contrato; con 1 o 2 caracteres la API respondería 400.
+- **Decisión:** con menos de 3 caracteres no se busca y se muestra "Escribe al menos 3 caracteres para buscar"; al borrar la búsqueda se vuelve a la lista completa.
+- **Dónde se ve:** `movements-page.html` (`search-hint`), `MIN_SEARCH_LENGTH`.
+
 ## Qué probé y qué no
 
-- **Probado automáticamente (56 pruebas con `npm test`):**
+- **Probado automáticamente (64 pruebas con `npm test`):**
+  - Rendimiento con 50.000 movimientos (ver D-39).
+  - Búsqueda: una sola petición al terminar de escribir, nada con menos de 3 caracteres, respuesta vieja ignorada (incidente), orden en el servidor, siguiente página con el cursor de la misma consulta.
   - Movimientos: estados, agrupación por día contable con los datos de la sección 4.1, filas, cambio de periodo, accesibilidad.
   - Transferencia: errores junto a cada campo, documento según tipo, monto sin puntos de miles, clave dinámica desde 2.000.000, cuerpo del contrato con ceros iniciales, doble clic, misma `Idempotency-Key` al reintentar y nueva si cambian los datos, errores de la API por campo, topes, clave rechazada, sesión vencida conservando datos, comprobante enmascarado, accesibilidad.
   - Sesión: renovación al iniciar, renovación silenciosa con actividad, aviso sin actividad, vencimiento, renovación antes de transferir, 401.
   - CSRF, adaptadores HTTP y reglas de la API simulada.
-- **Medido:** JavaScript inicial de 94,20 KB comprimido (límite: 250 KB); el formulario se carga aparte (14,19 KB).
-- **No probado:** Edge y Firefox de forma automática (las pruebas corren en Chrome; se evitaron APIs no soportadas, como `input type="month"`); revisión manual con lector de pantalla; rendimiento con 50.000 registros (Parte 3).
+- **Medido:** JavaScript inicial de 98,60 KB comprimido (límite: 250 KB); Movimientos se carga aparte (11,09 KB) y el formulario también (14,21 KB).
+- **Guía de extensión verificada:** el código de los pasos 1, 2 y 5 de `GUIA-EXTENSION.md` se copió tal cual en el proyecto, compiló y sus 4 pruebas pasaron; luego se retiró.
+- **No probado:**
+  - Edge y Firefox de forma automática: las pruebas corren en Chrome headless. Se evitaron APIs no soportadas (`input type="month"`). Edge usa el mismo motor que Chrome; Firefox es el mayor riesgo (RIESGOS R-10).
+  - INP real con un usuario: la prueba mide tiempos de agregar páginas y desplazarse como indicador.
+  - CSP real `default-src 'self'` sobre el build: no hay servidor en el alcance; el riesgo de estilos en línea está en RIESGOS R-01.
+  - Revisión manual con lector de pantalla y zoom.
 
 ## Lo que dejé fuera y por qué
 
-- Paginación, búsqueda y orden en Movimientos: corresponden a la Parte 3 (la API simulada ya los soporta).
-- Inicio de sesión: fuera del alcance (el enunciado excluye integrar autenticación). Al vencer, la app pide volver a iniciar sesión.
+- **Inicio de sesión:** fuera del alcance (el enunciado excluye integrar autenticación). Al vencer la sesión, la app pide volver a iniciarla.
+- **Pantalla de confirmación de la transferencia:** el enunciado pide no agregar pantallas (D-32).
+- **Validación del tope diario en el cliente:** no hay endpoint para conocer lo transferido en el día; lo valida la API (S-09).
+- **Nonce de CSP y `ErrorHandler` propio:** requieren el servidor real (RIESGOS R-01 y R-03).
+- **Lanzadores de Firefox y Edge en las pruebas:** por tiempo.
+- **Alias de rutas en `tsconfig`:** no los pide el enunciado (D-22).
 
 ## Si tuviera más tiempo
+
+1. Resolver la CSP: nonce desde el servidor (`ngCspNonce`), `inlineCritical: false` y prueba del build con la cabecera real (R-01).
+2. Registrar la API simulada solo en desarrollo con `fileReplacements` y verificar en CI que no llega a producción (R-02).
+3. Pruebas end-to-end con Playwright en Chrome, Edge y Firefox, incluida la medición de INP real con `web-vitals`.
+4. `ErrorHandler` propio que no imprima datos en la consola (R-03).
+5. Ventana deslizante de páginas en memoria para recorrer los 50.000 movimientos sin crecer en memoria (R-04).
+6. Generar los datos del mock en un Web Worker para eliminar la tarea larga de 600 ms (R-05).
+7. Revisión manual de accesibilidad con NVDA y JAWS, `aria-setsize`/`aria-posinset` en la lista virtual.
+8. Inicio de sesión en un diálogo que no recargue la página, para no perder el formulario si la sesión vence (R-07).
+9. `.nvmrc` y `engines` con una versión LTS de Node (R-14).

@@ -25,7 +25,7 @@ No hay back-end real. El interceptor `src/app/infrastructure/mock/simulated-api.
 - `POST /api/v1/sesion/renovar`: extiende la sesión 5 minutos y entrega un `csrfToken` nuevo.
 - `POST /api/v1/transferencias`: exige `X-CSRF-Token` e `Idempotency-Key`, valida las reglas de la sección 4.1 y aplica idempotencia (misma clave y mismo cuerpo devuelve el 201 original; otro cuerpo, 409).
 
-También simula una latencia de 300 ms, la sesión que vence a los 5 minutos y el límite de 10 peticiones por segundo (429 con `Retry-After`). Los datos son los de la sección 4.1 (`simulated-data.ts`).
+También simula una latencia de 300 ms, la sesión que vence a los 5 minutos y el límite de 10 peticiones por segundo (429 con `Retry-After`). Por defecto genera los **50.000 movimientos de octubre de 2026**, incluidos los 6 de la sección 4.1, con semilla fija; las pruebas de componentes usan solo los 6 de ejemplo (`simulated-data.ts`).
 
 Para ver los estados de la pantalla a mano, agrega `?escenario=` a la URL:
 
@@ -61,6 +61,20 @@ src/test/           pruebas, con la misma estructura que src/app
 
 Regla de dependencias: `ui` → `application` → `domain` ← `infrastructure`. La pantalla nunca usa `HttpClient`; pide datos al caso de uso, que habla con el puerto.
 
+## Movimientos con alto volumen
+
+- Lista virtual (`@angular/cdk/scrolling`): solo se dibujan las filas visibles; con 5.000 cargados hay unos 320 nodos en el DOM.
+- Páginas de 200 por cursor, una a la vez, al acercarse al final o con "Cargar más movimientos".
+- Búsqueda mientras se escribe: espera de 300 ms, mínimo 3 caracteres y cancelación de la consulta anterior (`switchMap`).
+- Orden por fecha o monto en el servidor.
+
+## Documentos
+
+- `DECISIONES.md`: decisiones, supuestos, qué se probó y qué no.
+- `INCIDENTE.md`: análisis del INC-2026-1187.
+- `RIESGOS.md`: riesgos técnicos.
+- `GUIA-EXTENSION.md`: cómo agregar la pantalla Detalle del movimiento.
+
 ## Sesión y seguridad
 
 - La sesión viaja en una cookie HttpOnly que el cliente no lee. El token CSRF vive solo en memoria (`CsrfTokenStore`) y lo agrega `csrfInterceptor` a las peticiones que cambian datos.
@@ -69,7 +83,7 @@ Regla de dependencias: `ui` → `application` → `domain` ← `infrastructure`.
 
 ## Pruebas
 
-`npm test` ejecuta 56 pruebas (Karma + Jasmine, Chrome headless), incluida la **revisión automática de accesibilidad con axe-core** (reglas WCAG 2.0, 2.1 y 2.2, niveles A y AA):
+`npm test` ejecuta 64 pruebas (Karma + Jasmine, Chrome headless), incluidas la **revisión automática de accesibilidad con axe-core** (reglas WCAG 2.0, 2.1 y 2.2, niveles A y AA) y la **medición de rendimiento con 50.000 movimientos** (`src/test/performance`, que imprime los tiempos medidos en la salida de la prueba):
 
 - **Pantalla Nueva transferencia**: validaciones de la sección 4.1, errores de la API junto a cada campo, clave dinámica desde 2.000.000, doble clic, idempotencia al reintentar, sesión vencida sin perder datos, comprobante enmascarado y accesibilidad.
 - **Sesión**: renovación con actividad, aviso sin actividad, vencimiento y CSRF.

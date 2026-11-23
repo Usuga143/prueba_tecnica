@@ -1,6 +1,6 @@
 # Registro de decisiones — DS-FE-20261119-xpjf
 
-Inicio: 12:52 · Fin de la Parte 1: 13:50 · Fin: 14:25
+Inicio: 12:52 · Fin de la Parte 1: 13:50 · Fin: 14:20
 
 ## Supuestos
 

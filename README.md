@@ -38,6 +38,8 @@ Para ver los estados de la pantalla a mano, agrega `?escenario=` a la URL:
 
 La sesión simulada vence a los 5 minutos de abrir la página; recargar la página equivale a iniciar sesión de nuevo.
 
+Para probar la transferencia en la API simulada: la clave dinámica `000000` simula una clave vencida (422), y un monto que supere el acumulado diario de 100.000.000 responde 422 de tope diario.
+
 **Para conectar la API real:** quitar `simulatedApiInterceptor` de `provideHttpClient(...)` en `src/app/app.config.ts`. No hay que cambiar nada más.
 
 ## Arquitectura (hexagonal)
@@ -45,12 +47,12 @@ La sesión simulada vence a los 5 minutos de abrir la página; recargar la pági
 ```
 src/app/
   domain/
-    model/          interfaces del contrato (movement, shared/api-error)
-    ports/          clases abstractas que la app necesita (MovementPort)
-  application/      casos de uso (ListMovementsUseCase + agrupación por día contable)
+    model/          interfaces del contrato (movement, transfer, session, shared)
+    ports/          clases abstractas que la app necesita (Movement, Transfer, Session)
+  application/      casos de uso, reglas de transferencia y SessionKeeper
   infrastructure/
     adapters/       implementaciones de los puertos con HttpClient
-    http/           traducción de errores HTTP al formato del contrato
+    http/           interceptor CSRF y traducción de errores al formato del contrato
     mock/           API simulada y datos de ejemplo
   ui/pages/         pantallas Angular
   app.config.ts     conexión puerto -> adaptador, locale es-CO, HttpClient
@@ -59,11 +61,19 @@ src/test/           pruebas, con la misma estructura que src/app
 
 Regla de dependencias: `ui` → `application` → `domain` ← `infrastructure`. La pantalla nunca usa `HttpClient`; pide datos al caso de uso, que habla con el puerto.
 
+## Sesión y seguridad
+
+- La sesión viaja en una cookie HttpOnly que el cliente no lee. El token CSRF vive solo en memoria (`CsrfTokenStore`) y lo agrega `csrfInterceptor` a las peticiones que cambian datos.
+- `SessionKeeper` renueva la sesión mientras el tesorero usa teclado o puntero, avisa un minuto antes de vencer si no hay actividad ("Seguir conectado") y la renueva antes de enviar una transferencia.
+- Nada se guarda en localStorage, sessionStorage, IndexedDB ni cookies legibles; el formulario se limpia tras enviar.
+
 ## Pruebas
 
-`npm test` ejecuta 24 pruebas (Karma + Jasmine, Chrome headless):
+`npm test` ejecuta 56 pruebas (Karma + Jasmine, Chrome headless), incluida la **revisión automática de accesibilidad con axe-core** (reglas WCAG 2.0, 2.1 y 2.2, niveles A y AA):
 
-- **Pantalla Movimientos**: estados de carga, vacío, error con reintento y sesión vencida; agrupación por día contable con los datos de la sección 4.1; contenido de cada fila; cambio de periodo.
+- **Pantalla Nueva transferencia**: validaciones de la sección 4.1, errores de la API junto a cada campo, clave dinámica desde 2.000.000, doble clic, idempotencia al reintentar, sesión vencida sin perder datos, comprobante enmascarado y accesibilidad.
+- **Sesión**: renovación con actividad, aviso sin actividad, vencimiento y CSRF.
+- **Pantalla Movimientos**: estados de carga, vacío, error con reintento y sesión vencida; agrupación por día contable con los datos de la sección 4.1; contenido de cada fila; cambio de periodo; accesibilidad.
 - **Caso de uso**: conversión UTC → Colombia, agrupación por día y mínimo de 3 caracteres en la búsqueda.
 - **Adaptador HTTP**: URL y parámetros del contrato; traducción de errores.
 - **API simulada**: filtros, búsqueda sin tildes, orden, paginación por cursor, validaciones, sesión, CSRF e idempotencia.

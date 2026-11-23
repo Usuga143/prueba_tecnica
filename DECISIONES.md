@@ -13,6 +13,11 @@ Inicio: 12:52 · Fin de la Parte 1: 13:50 · Fin: <hora>
 | S-05 | La cuenta es fija: REC-2231. | Es la única cuenta del enunciado. | Se agregaría un selector de cuenta y la cuenta iría en la ruta (`/cuentas/:id/movimientos`). |
 | S-06 | La primera página trae 200 registros (máximo del contrato). | Menos viajes de red; el p95 por página es 400 ms. | Si 200 filas tardaran demasiado en pintar, se bajaría el límite (la Parte 3 virtualiza la lista). |
 | S-07 | Un 403 o un 400 no se reintentan desde la pantalla. | Reintentar no cambia el resultado (falta de permiso o parámetro inválido). | Se mostraría también "Reintentar" en esos casos. |
+| S-08 | El tesorero escribe el monto con coma decimal y sin puntos de miles ("1500000,50"). | Es el formato colombiano y evita la ambigüedad de "1.500" (¿mil quinientos o uno con cinco?). | Se aceptaría punto decimal y se mostraría una confirmación con el valor interpretado. |
+| S-09 | El cliente no conoce lo transferido antes en el día; el tope diario lo valida la API (422). | No hay endpoint para consultar el acumulado diario. | Si existiera, se validaría también en el cliente antes de enviar. |
+| S-10 | El primer token CSRF se obtiene con `POST /sesion/renovar` al abrir el portal. | El contrato no define otra forma de obtenerlo. | Si el servidor lo entregara al iniciar sesión, se leería de esa respuesta. |
+| S-11 | "Inactividad" para el cliente es que el tesorero no use teclado ni puntero. | Renovar sin actividad real mantendría abierta una sesión desatendida en un computador compartido. | Si el banco pidiera mantener la sesión mientras la pestaña esté abierta, se renovaría por tiempo. |
+| S-12 | El servidor no guarda las respuestas de error para la idempotencia (solo el 201). | El contrato solo describe repetir "el 201 original". | Si guardara también errores, un reintento tras un 422 necesitaría otra clave. |
 
 ## Decisiones
 
@@ -215,15 +220,107 @@ Inicio: 12:52 · Fin de la Parte 1: 13:50 · Fin: <hora>
 - **Por qué:** el enunciado no los pide y el proyecto es pequeño; priorizo el tiempo.
 - **Consecuencias y trade-offs:** imports largos.
 
-## Qué probé y qué no (hasta la Parte 1)
+### D-23 Mantener la sesión viva solo mientras hay actividad, con aviso antes de vencer
+- **Tema:** seguridad
+- **Contexto:** los tesoreros pierden lo diligenciado porque la sesión vence a mitad de la transferencia. La sesión vence a los 5 minutos y solo `POST /sesion/renovar` la extiende. El portal se usa en computadores compartidos.
+- **Alternativas consideradas:**
+  - Renovar cada 4 minutos siempre: nunca vence, pero deja abierta una sesión desatendida en un computador compartido (rompe el propósito del vencimiento).
+  - Guardar el borrador del formulario para recuperarlo tras volver a entrar: prohibido por la política (no se guardan datos en el navegador).
+  - Renovar solo al enviar: si el tesorero tarda más de 5 minutos, la sesión ya venció.
+  - **`SessionKeeper`:** registra la actividad real (teclado, puntero, escritura); si hubo actividad desde la última renovación, renueva cuando faltan 2 minutos; si no, avisa cuando falta 1 minuto con un botón "Seguir conectado"; antes de cada transferencia exige al menos 1 minuto de sesión.
+- **Decisión:** `SessionKeeper` en `application/session`, iniciado por el componente raíz; aviso en una franja `role="alert"`.
+- **Por qué:** resuelve la queja sin extender sesiones desatendidas, y cumple WCAG 2.2.1 (ajustar tiempo: avisar y permitir extenderlo con una acción simple).
+- **Consecuencias y trade-offs:** una petición de renovación cada ~3 minutos por usuario activo. Si el tesorero ignora el aviso, la sesión vence y el formulario conserva los datos en memoria, pero no puede enviarse.
+- **Dónde se ve:** `application/session/session-keeper.ts`, `app.ts`, `app.html`, `session-keeper.spec.ts`.
 
-- **Probado automáticamente (24 pruebas):** estados de la pantalla, agrupación por día contable con los datos de la sección 4.1, contenido de las filas, cambio de periodo, caso de uso, adaptador HTTP y reglas de la API simulada.
-- **Medido:** build de producción con JavaScript inicial de 89,86 KB comprimido (límite: 250 KB).
-- **No probado todavía:** revisión automática de accesibilidad (Parte 2), rendimiento con 50.000 registros (Parte 3), Edge y Firefox (las pruebas corren en Chrome).
+### D-24 Token CSRF solo en memoria y agregado por un interceptor
+- **Tema:** seguridad
+- **Contexto:** las peticiones que cambian datos llevan `X-CSRF-Token`; el token cambia en cada renovación; nada puede quedar en el navegador.
+- **Alternativas consideradas:** guardarlo en `sessionStorage` (prohibido); pasarlo a mano en cada adaptador (fácil de olvidar); **un `signal` en memoria y un interceptor**.
+- **Decisión:** `CsrfTokenStore` guarda el token en memoria; `csrfInterceptor` lo agrega a POST/PUT/PATCH/DELETE hacia `/api/...` y nunca a otros dominios. Al vencer la sesión se borra.
+- **Por qué:** un solo lugar, siempre el token más reciente, sin persistencia.
+- **Consecuencias y trade-offs:** al recargar la página se pierde el token y se pide otro con la renovación inicial.
+- **Dónde se ve:** `application/session/csrf-token.store.ts`, `infrastructure/http/csrf.interceptor.ts`, `csrf.interceptor.spec.ts`.
+
+### D-25 Idempotencia: una clave por intento, reutilizada al reintentar con los mismos datos
+- **Tema:** seguridad
+- **Contexto:** un doble clic o un reintento no pueden crear dos transferencias. El servidor repite el 201 original con la misma `Idempotency-Key` y el mismo cuerpo, y responde 409 con otro cuerpo.
+- **Alternativas consideradas:**
+  - Clave nueva en cada clic: un reintento tras una falla de red podría duplicar la transferencia.
+  - Clave fija para toda la vida del formulario: dos transferencias distintas e intencionales chocarían (409).
+  - **Clave atada a una huella de los datos de la transferencia, sin la clave dinámica.**
+- **Decisión:** se genera con `crypto.randomUUID()` y se reutiliza mientras los datos no cambien. La clave dinámica no entra en la huella: si el tesorero reintenta con una clave nueva tras un fallo, se conserva la misma `Idempotency-Key` y el servidor responde 409 si la primera sí se creó, en vez de crear otra. Tras un 201 la clave se descarta.
+- **Por qué:** el caso peligroso es "no sé si se hizo"; ahí el mensaje dice que puede reenviar sin duplicar.
+- **Consecuencias y trade-offs:** tras un 409 se pide revisar Movimientos antes de reenviar.
+- **Dónde se ve:** `transfer-page.ts` (`attempt`, `fingerprint`), pruebas "reuses the same Idempotency-Key..." y "uses a new Idempotency-Key...".
+
+### D-26 Doble clic: envío ignorado mientras hay uno en curso, con `aria-disabled`
+- **Tema:** diseño
+- **Contexto:** evitar envíos duplicados sin perder accesibilidad.
+- **Alternativas consideradas:** `disabled` en el botón (el botón pierde el foco y el lector de pantalla deja de anunciarlo); `exhaustMap` sobre un flujo de clics (más difícil de explicar); **una señal `pending` que ignora el clic y `aria-disabled="true"`**.
+- **Decisión:** `pending` + texto "Enviando…" + región `role="status"`. La idempotencia del servidor queda como segunda defensa.
+- **Dónde se ve:** `transfer-page.ts` (`submit`), prueba "sends a single transfer on double click".
+
+### D-27 Reglas de transferencia como funciones puras, adaptadas a validadores de Angular
+- **Tema:** arquitectura
+- **Contexto:** las reglas de la sección 4.1 son del negocio, no de Angular.
+- **Alternativas consideradas:** validadores de Angular con las reglas adentro (atadas al framework); **funciones puras en `application/transfer/transfer-rules.ts`** y validadores delgados en la UI.
+- **Decisión:** `validateAmount`, `validateAccountNumber`, `validateDocumentNumber`, `validateDescription`, `validateDynamicKey`, `parseAmountInput`; `transfer-validators.ts` solo las adapta.
+- **Por qué:** se prueban sin TestBed y se reutilizarían en otra pantalla.
+- **Dónde se ve:** `transfer-rules.ts`, `transfer-validators.ts`, `transfer-rules.spec.ts`.
+
+### D-28 Monto con coma decimal; el punto se rechaza
+- **Tema:** seguridad
+- **Contexto:** "1.500" en Colombia es mil quinientos; leído como decimal sería 1,50. Un error así transfiere mil veces menos o más.
+- **Alternativas consideradas:** aceptar punto y coma (ambiguo); campo numérico `type="number"` (depende del idioma del navegador, acepta "e" y cambia el valor con la rueda del mouse); **texto con `inputmode="decimal"`, solo dígitos y coma**.
+- **Decisión:** regex `^\d+(,\d{1,2})?$`, conversión a centavos enteros y al formato del contrato ("1500000.50"), y una vista previa "Vas a transferir $ 1.500.000,50".
+- **Por qué:** elimina la ambigüedad y el tesorero ve el valor interpretado antes de enviar.
+- **Dónde se ve:** `transfer-rules.ts` (`parseAmountInput`), `transfer-page.html`.
+
+### D-29 Datos sensibles: sin persistencia, sin autocompletar, sin corrector y borrado tras el envío
+- **Tema:** seguridad
+- **Contexto:** computadores compartidos; ningún dato personal o financiero puede quedar en el navegador ni en la consola.
+- **Decisión:** el formulario vive solo en memoria; `autocomplete="off"` en cuenta, documento y monto (el navegador no los sugiere al siguiente usuario); `autocomplete="one-time-code"` en la clave dinámica; `spellcheck="false"` (algunos correctores envían el texto a servicios externos); la clave se borra si el monto baja del umbral o si la API la rechaza; el formulario se limpia tras un 201; el comprobante muestra solo la cuenta enmascarada que entrega la API; ningún `console.log`.
+- **Alternativas consideradas:** guardar un borrador cifrado en `sessionStorage` (sigue siendo almacenamiento en el navegador).
+- **Dónde se ve:** `transfer-page.html`, `transfer-page.ts`, prueba "shows the receipt with the masked destination account...".
+
+### D-30 Errores de la API junto a cada campo y resumen de errores enfocable
+- **Tema:** diseño
+- **Contexto:** se deben mostrar junto a cada campo los errores de la API; WCAG 2.2 AA (3.3.1, 3.3.3, 4.1.2).
+- **Alternativas consideradas:** solo un mensaje general (no dice qué corregir); **error por campo + resumen**.
+- **Decisión:** `errores[].campo` del 400 coincide con el nombre del control (por eso se conservaron los nombres del contrato) y se marca con `setErrors({ api: codigo })`. Los 422 de tope van al monto y el de clave dinámica a su campo. Cada campo tiene `aria-invalid` y `aria-describedby` hacia su pista y su error. Al enviar con errores se enfoca un resumen con enlaces a cada campo. Los errores generales (401, 409, 429, 503) van en `role="alert"`.
+- **Por qué:** el tesorero sabe qué corregir y el lector de pantalla lo anuncia.
+- **Dónde se ve:** `transfer-page.ts` (`handleError`, `showSummary`), `transfer-messages.ts`.
+
+### D-31 Revisión automática de accesibilidad con axe-core en las pruebas
+- **Tema:** pruebas
+- **Contexto:** el enunciado pide una revisión automática de accesibilidad.
+- **Alternativas consideradas:** Lighthouse o pa11y (requieren levantar la app y otro proceso); `jest-axe` (es para Jest, no Karma); **axe-core dentro de las pruebas de Karma**.
+- **Decisión:** `expectNoAccessibilityViolations` corre axe con las reglas `wcag2a`, `wcag2aa`, `wcag21a`, `wcag21aa`, `wcag22aa` sobre el formulario (vacío y con errores) y sobre Movimientos con datos.
+- **Por qué:** corre con `npm test`, sin pasos extra. Se comprobó que detecta violaciones reales con un HTML defectuoso.
+- **Consecuencias y trade-offs:** axe encuentra cerca de un tercio de los problemas; no reemplaza una revisión manual con teclado y lector de pantalla.
+- **Dónde se ve:** `src/test/support/axe.ts`, pruebas de ambas pantallas.
+
+### D-32 Sin paso de confirmación antes de transferir
+- **Tema:** diseño
+- **Contexto:** muchos bancos muestran "Confirma los datos" antes de enviar.
+- **Alternativas consideradas:** pantalla de confirmación (más segura ante errores de digitación, pero es una pantalla más y el enunciado pide no agregar pantallas).
+- **Decisión:** no agregarla; en su lugar, vista previa del monto interpretado.
+- **Consecuencias y trade-offs:** si el banco la exige, se agregaría como un estado del mismo componente.
+
+## Qué probé y qué no
+
+- **Probado automáticamente (56 pruebas con `npm test`):**
+  - Movimientos: estados, agrupación por día contable con los datos de la sección 4.1, filas, cambio de periodo, accesibilidad.
+  - Transferencia: errores junto a cada campo, documento según tipo, monto sin puntos de miles, clave dinámica desde 2.000.000, cuerpo del contrato con ceros iniciales, doble clic, misma `Idempotency-Key` al reintentar y nueva si cambian los datos, errores de la API por campo, topes, clave rechazada, sesión vencida conservando datos, comprobante enmascarado, accesibilidad.
+  - Sesión: renovación al iniciar, renovación silenciosa con actividad, aviso sin actividad, vencimiento, renovación antes de transferir, 401.
+  - CSRF, adaptadores HTTP y reglas de la API simulada.
+- **Medido:** JavaScript inicial de 94,20 KB comprimido (límite: 250 KB); el formulario se carga aparte (14,19 KB).
+- **No probado:** Edge y Firefox de forma automática (las pruebas corren en Chrome; se evitaron APIs no soportadas, como `input type="month"`); revisión manual con lector de pantalla; rendimiento con 50.000 registros (Parte 3).
 
 ## Lo que dejé fuera y por qué
 
-- Paginación, búsqueda y orden en la pantalla: corresponden a la Parte 3 (la API simulada ya los soporta).
-- Renovación de sesión y CSRF en el cliente: corresponden a la Parte 2 (la API simulada ya los soporta).
+- Paginación, búsqueda y orden en Movimientos: corresponden a la Parte 3 (la API simulada ya los soporta).
+- Inicio de sesión: fuera del alcance (el enunciado excluye integrar autenticación). Al vencer, la app pide volver a iniciar sesión.
 
 ## Si tuviera más tiempo

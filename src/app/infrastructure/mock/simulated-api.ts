@@ -11,7 +11,7 @@ import { Injectable, inject } from '@angular/core';
 import { Observable, delay, mergeMap, of, throwError, timer } from 'rxjs';
 import { toColombiaDayAndTime } from '../../application/movement/list-movements.use-case';
 import { Movement, MovementOrder } from '../../domain/model/movement/movement.model';
-import { SAMPLE_ACCOUNT, SAMPLE_MOVEMENTS } from './simulated-data';
+import { SAMPLE_ACCOUNT, generateOctoberMovements } from './simulated-data';
 
 
 export const SIMULATED_LATENCY_MS = 300;
@@ -52,9 +52,19 @@ type TransferField =
   | 'claveDinamica';
 type TransferBody = Partial<Record<TransferField, unknown>>;
 
+interface IndexedMovement {
+  movement: Movement;
+  day: string;
+  text: string;
+  cents: number;
+}
+
 @Injectable({ providedIn: 'root' })
 export class SimulatedBackend {
-  movements: Movement[] = SAMPLE_MOVEMENTS;
+  private source: Movement[] | null = null;
+  private index: IndexedMovement[] | null = null;
+  private readonly sortedByOrder = new Map<MovementOrder, IndexedMovement[]>();
+  private rateLimitEnabled = true;
   private sessionExpiresAt = Date.now() + SESSION_DURATION_MS;
   private csrfToken: string | null = null;
   private recentRequests: number[] = [];
@@ -65,7 +75,7 @@ export class SimulatedBackend {
   handle(req: HttpRequest<unknown>, scenario: Scenario = 'normal'): SimulatedResponse {
     const now = Date.now();
     this.recentRequests = this.recentRequests.filter((t) => now - t < 1000);
-    if (this.recentRequests.length >= MAX_REQUESTS_PER_SECOND) {
+    if (this.rateLimitEnabled && this.recentRequests.length >= MAX_REQUESTS_PER_SECOND) {
       return apiError(429, 'LIMITE_DE_PETICIONES', 'Demasiadas peticiones', { 'Retry-After': '1' });
     }
     this.recentRequests.push(now);
@@ -84,6 +94,18 @@ export class SimulatedBackend {
       return this.createTransfer(req, now);
     }
     return apiError(404, 'NO_ENCONTRADO', 'Recurso no encontrado');
+  }
+
+  /** Reemplaza los datos (las pruebas usan los 6 de la sección 4.1). Por defecto: 50.000 de octubre. */
+  setMovements(movements: Movement[]): void {
+    this.source = movements;
+    this.index = null;
+    this.sortedByOrder.clear();
+  }
+
+  /** Solo para la medición de rendimiento: sin límite de 10 peticiones por segundo. */
+  disableRateLimit(): void {
+    this.rateLimitEnabled = false;
   }
 
   /** Solo para pruebas: fuerza el vencimiento de la sesión. */
@@ -141,31 +163,48 @@ export class SimulatedBackend {
       offset = Number(match[1]);
     }
 
-    const term = q ? normalizeText(q) : null;
-    const filtered =
+    const term = q ? normalizeText(q.trim()) : null;
+    const matches =
       scenario === 'vacio'
         ? []
-        : this.movements.filter((movement) => {
-            const { day } = toColombiaDayAndTime(movement.fechaHora);
-            if (day < desde || day > hasta) return false;
-            if (!term) return true;
-            return (
-              normalizeText(movement.descripcion).includes(term) ||
-              (movement.referencia !== null && normalizeText(movement.referencia).includes(term))
-            );
-          });
-    const sorted = [...filtered].sort(comparatorFor(orden));
+        : this.sorted(orden).filter(
+            (item) => item.day >= desde && item.day <= hasta && (term === null || item.text.includes(term)),
+          );
     const nextOffset = offset + limite;
 
     return {
       status: 200,
       body: {
         cuenta: SAMPLE_ACCOUNT,
-        totalRegistros: sorted.length,
-        movimientos: sorted.slice(offset, nextOffset),
-        siguiente: nextOffset < sorted.length ? `c-${nextOffset}-${fingerprint}` : null,
+        totalRegistros: matches.length,
+        movimientos: matches.slice(offset, nextOffset).map((item) => item.movement),
+        siguiente: nextOffset < matches.length ? `c-${nextOffset}-${fingerprint}` : null,
       },
     };
+  }
+
+  /**
+   * Índice calculado una sola vez: día contable, texto normalizado y monto en centavos de cada
+   * movimiento, y una copia ordenada por cada criterio. Así cada consulta solo filtra.
+   */
+  private sorted(orden: MovementOrder): IndexedMovement[] {
+    if (this.index === null) {
+      const source = this.source ?? generateOctoberMovements();
+      this.source = source;
+      this.index = source.map((movement) => ({
+        movement,
+        day: toColombiaDayAndTime(movement.fechaHora).day,
+        // Salto de línea entre campos: una búsqueda no puede coincidir "a caballo" entre ambos.
+        text: normalizeText(`${movement.descripcion}\n${movement.referencia ?? ''}`),
+        cents: toCents(movement.monto),
+      }));
+    }
+    let sorted = this.sortedByOrder.get(orden);
+    if (sorted === undefined) {
+      sorted = [...this.index].sort(comparatorFor(orden));
+      this.sortedByOrder.set(orden, sorted);
+    }
+    return sorted;
   }
 
   private createTransfer(req: HttpRequest<unknown>, now: number): SimulatedResponse {
@@ -328,16 +367,18 @@ function compare(a: string | number, b: string | number): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-function comparatorFor(orden: MovementOrder): (a: Movement, b: Movement) => number {
+function comparatorFor(orden: MovementOrder): (a: IndexedMovement, b: IndexedMovement) => number {
   switch (orden) {
     case 'fecha_asc':
-      return (a, b) => compare(a.fechaHora, b.fechaHora) || compare(a.id, b.id);
+      return (a, b) =>
+        compare(a.movement.fechaHora, b.movement.fechaHora) || compare(a.movement.id, b.movement.id);
     case 'monto_desc':
-      return (a, b) => compare(toCents(b.monto), toCents(a.monto)) || compare(b.id, a.id);
+      return (a, b) => compare(b.cents, a.cents) || compare(b.movement.id, a.movement.id);
     case 'monto_asc':
-      return (a, b) => compare(toCents(a.monto), toCents(b.monto)) || compare(a.id, b.id);
+      return (a, b) => compare(a.cents, b.cents) || compare(a.movement.id, b.movement.id);
     default:
-      return (a, b) => compare(b.fechaHora, a.fechaHora) || compare(b.id, a.id);
+      return (a, b) =>
+        compare(b.movement.fechaHora, a.movement.fechaHora) || compare(b.movement.id, a.movement.id);
   }
 }
 

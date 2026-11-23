@@ -6,6 +6,11 @@ import {
   SimulatedBackend,
   simulatedApiInterceptor,
 } from '../../../app/infrastructure/mock/simulated-api';
+import {
+  OCTOBER_2026_TOTAL,
+  SAMPLE_MOVEMENTS,
+  generateOctoberMovements,
+} from '../../../app/infrastructure/mock/simulated-data';
 
 const URL = '/api/v1/cuentas/REC-2231/movimientos';
 const OCTOBER = { desde: '2026-10-01', hasta: '2026-10-31' };
@@ -18,6 +23,7 @@ describe('simulatedApiInterceptor', () => {
       providers: [provideHttpClient(withInterceptors([simulatedApiInterceptor]))],
     });
     http = TestBed.inject(HttpClient);
+    TestBed.inject(SimulatedBackend).setMovements(SAMPLE_MOVEMENTS);
   });
 
   function get(params: Record<string, string | number>, url = URL) {
@@ -73,6 +79,28 @@ describe('simulatedApiInterceptor', () => {
     expect(get({ desde: '2026-10-01', hasta: '2026-11-15' }).error?.status).toBe(400);
     expect(get({ ...OCTOBER, limite: 201 }).error?.status).toBe(400);
     expect(get(OCTOBER, '/api/v1/cuentas/OTRA/movimientos').error?.status).toBe(403);
+  }));
+
+  it('generates the 50.000 October movements of REC-2231 by default', fakeAsync(() => {
+    TestBed.inject(SimulatedBackend).setMovements(generateOctoberMovements());
+    const { body } = get({ ...OCTOBER, limite: 200 });
+
+    expect(body?.totalRegistros).toBe(OCTOBER_2026_TOTAL);
+    expect(body?.movimientos.length).toBe(200);
+    expect(body?.movimientos[0].id).toBe('MV-8849999');
+    expect(new Set(generateOctoberMovements().map((m) => m.id)).size).toBe(OCTOBER_2026_TOTAL);
+  }));
+
+  it('answers 429 with Retry-After above 10 requests per second', fakeAsync(() => {
+    const statuses: number[] = [];
+    for (let i = 0; i < 11; i++) {
+      http.get(URL, { params: OCTOBER }).subscribe({
+        next: () => statuses.push(200),
+        error: (e: HttpErrorResponse) => statuses.push(e.status),
+      });
+    }
+    tick(SIMULATED_LATENCY_MS);
+    expect(statuses.filter((s) => s === 429).length).toBe(1);
   }));
 
   it('answers 401 when the session expired', fakeAsync(() => {
